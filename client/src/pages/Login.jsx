@@ -1,4 +1,4 @@
-// Login.jsx - Supports both Password Login AND Magic Link
+// Login.jsx - Fixed version with correct endpoint mapping and Forgot Password
 import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import './Login.css';
@@ -56,7 +56,7 @@ export default function Login() {
                         clearInterval(pollInterval);
                         setIsPolling(false);
                         // Auto login after verification
-                        const loginRes = await fetch(`${BACKEND_URL}/api/auth/magic-login`, {
+                        const loginRes = await fetch(`${BACKEND_URL}/api/auth/get-login-token`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ email })
@@ -64,7 +64,11 @@ export default function Login() {
                         const loginData = await loginRes.json();
                         if (loginData.token) {
                             localStorage.setItem('token', loginData.token);
+                            localStorage.setItem('refreshToken', loginData.refreshToken || '');
                             localStorage.setItem('userName', loginData.username || email.split('@')[0]);
+                            localStorage.setItem('userEmail', email);
+                            localStorage.setItem('app_version', '2.0.0');
+                            
                             setMessage('Email verified! Redirecting...');
                             setTimeout(() => navigate('/dashboard'), 1500);
                         }
@@ -84,23 +88,28 @@ export default function Login() {
         };
     }, [isPolling, email, navigate, BACKEND_URL]);
 
-    // Password Login
+    // PASSWORD LOGIN - This now correctly uses the password endpoint
     const handlePasswordLogin = async (e) => {
         e.preventDefault();
         setIsLoading(true);
         setError('');
         setMessage('');
         
+        console.log('🔐 Attempting PASSWORD login for:', email);
+        
         try {
-            const res = await fetch(`${BACKEND_URL}/api/auth/login`, {
+            // FIXED: Using the correct password login endpoint
+            const res = await fetch(`${BACKEND_URL}/api/auth/login-password`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password })
             });
 
             const data = await res.json();
+            console.log('Password login response:', { ok: res.ok, hasToken: !!data.token });
 
             if (res.ok && data.token) {
+                // Store tokens
                 localStorage.setItem('token', data.token);
                 localStorage.setItem('refreshToken', data.refreshToken || '');
                 localStorage.setItem('userName', data.user?.username || email.split('@')[0]);
@@ -113,33 +122,52 @@ export default function Login() {
                 setError(data.message || data.error || 'Login failed. Please check your credentials.');
             }
         } catch (err) {
-            console.error('Login error:', err);
+            console.error('Password login error:', err);
             setError('Server connection failed. Please try again.');
         } finally {
             setIsLoading(false);
         }
     };
 
-    // Magic Link Login (Send email)
+    // MAGIC LINK LOGIN - Send email with magic link
     const handleMagicLinkLogin = async (e) => {
         e.preventDefault();
         setIsLoading(true);
         setError('');
         setMessage('');
         
+        console.log('✨ Attempting MAGIC LINK login for:', email);
+        
         try {
-            const res = await fetch(`${BACKEND_URL}/api/auth/send-magic-link`, {
+            // FIXED: Using the correct magic link endpoint
+            const res = await fetch(`${BACKEND_URL}/api/auth/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email })
             });
 
             const data = await res.json();
+            console.log('Magic link response:', data);
 
-            if (res.ok) {
+            if (res.ok && data.success) {
                 setMessage('✨ Magic link sent! Check your email to login.');
                 setIsPolling(true);
                 setPollingCount(0);
+            } else if (data.needsVerification) {
+                setMessage('📧 Verification needed. Please verify your email first.');
+                // Option to resend verification
+                setTimeout(async () => {
+                    try {
+                        await fetch(`${BACKEND_URL}/api/auth/resend-verification`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ email })
+                        });
+                        setMessage('📧 Verification link resent! Check your email.');
+                    } catch (err) {
+                        console.error('Resend error:', err);
+                    }
+                }, 2000);
             } else {
                 setError(data.message || 'Failed to send magic link');
             }
@@ -151,15 +179,17 @@ export default function Login() {
         }
     };
 
-    // Password Registration
+    // REGISTER with password
     const handleRegister = async (e) => {
         e.preventDefault();
         setIsLoading(true);
         setError('');
         setMessage('');
         
+        console.log('📝 Attempting registration for:', email);
+        
         try {
-            const res = await fetch(`${BACKEND_URL}/api/auth/register`, {
+            const res = await fetch(`${BACKEND_URL}/api/auth/register-password`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ 
@@ -170,11 +200,18 @@ export default function Login() {
             });
 
             const data = await res.json();
+            console.log('Register response:', { ok: res.ok, hasToken: !!data.token });
 
-            if (res.ok) {
-                setMessage('Registration successful! You can now login with password or use magic link.');
-                setIsLogin(true);
-                setPassword('');
+            if (res.ok && data.token) {
+                // Auto-login after registration
+                localStorage.setItem('token', data.token);
+                localStorage.setItem('refreshToken', data.refreshToken || '');
+                localStorage.setItem('userName', data.user?.username || email.split('@')[0]);
+                localStorage.setItem('userEmail', email);
+                localStorage.setItem('app_version', '2.0.0');
+                
+                setMessage('Registration successful! Redirecting...');
+                setTimeout(() => navigate('/dashboard'), 1500);
             } else {
                 setError(data.message || data.error || 'Registration failed');
             }
@@ -209,13 +246,22 @@ export default function Login() {
                     <div className="auth-method-toggle">
                         <button 
                             className={`method-btn ${authMethod === 'password' ? 'active' : ''}`}
-                            onClick={() => { setAuthMethod('password'); setError(''); setMessage(''); }}
+                            onClick={() => { 
+                                setAuthMethod('password'); 
+                                setError(''); 
+                                setMessage('');
+                                setIsPolling(false);
+                            }}
                         >
                             🔐 Password Login
                         </button>
                         <button 
                             className={`method-btn ${authMethod === 'magic' ? 'active' : ''}`}
-                            onClick={() => { setAuthMethod('magic'); setError(''); setMessage(''); }}
+                            onClick={() => { 
+                                setAuthMethod('magic'); 
+                                setError(''); 
+                                setMessage('');
+                            }}
                         >
                             ✨ Magic Link
                         </button>
@@ -237,7 +283,11 @@ export default function Login() {
                 )}
 
                 {!isPolling && (
-                    <form onSubmit={isLogin ? (authMethod === 'password' ? handlePasswordLogin : handleMagicLinkLogin) : handleRegister}>
+                    <form onSubmit={
+                        isLogin 
+                            ? (authMethod === 'password' ? handlePasswordLogin : handleMagicLinkLogin)
+                            : handleRegister
+                    }>
                         <div className="input-group">
                             <label>Email Address</label>
                             <input 
@@ -250,19 +300,29 @@ export default function Login() {
                             />
                         </div>
 
-                        {(isLogin && authMethod === 'password') || !isLogin ? (
-                            <div className="input-group">
-                                <label>Password</label>
-                                <input 
-                                    type="password" 
-                                    placeholder="••••••••"
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)} 
-                                    required 
-                                    disabled={isLoading}
-                                />
-                            </div>
-                        ) : null}
+                        {/* Show password field for Password Login AND Registration */}
+                        {((isLogin && authMethod === 'password') || !isLogin) && (
+                            <>
+                                <div className="input-group">
+                                    <label>Password</label>
+                                    <input 
+                                        type="password" 
+                                        placeholder="••••••••"
+                                        value={password}
+                                        onChange={(e) => setPassword(e.target.value)} 
+                                        required 
+                                        disabled={isLoading}
+                                    />
+                                </div>
+                                
+                                {/* Add Forgot Password link - Only for password login */}
+                                {isLogin && authMethod === 'password' && (
+                                    <div className="forgot-password-link">
+                                        <Link to="/forgot-password">Forgot Password?</Link>
+                                    </div>
+                                )}
+                            </>
+                        )}
 
                         <button type="submit" className="auth-btn" disabled={isLoading}>
                             {isLoading 
@@ -284,6 +344,7 @@ export default function Login() {
                             setMessage('');
                             setAuthMethod('password');
                             setIsPolling(false);
+                            setPassword('');
                         }}
                         className="link-button"
                     >
@@ -292,10 +353,11 @@ export default function Login() {
                 </p>
                 
                 <div className="demo-credentials">
-                    <p>Demo Account:</p>
-                    <code>Email: demo@peersync.com<br/>Password: demo123</code>
+              
                     <small style={{ display: 'block', marginTop: '10px' }}>
-                        💡 Use Password Login or Magic Link (if email configured)
+                        💡 <strong>Password Login:</strong> Use email + password<br/>
+                        💡 <strong>Magic Link:</strong> Receive email with login link<br/>
+                        💡 <strong>Forgot Password:</strong> Click "Forgot Password?" to reset
                     </small>
                 </div>
             </div>

@@ -619,4 +619,196 @@ router.post('/debug/verify-user', async (req, res) => {
     }
 });
 
+// Add these new endpoints to your routes/auth.js file
+
+// FORGOT PASSWORD - Send reset link
+router.post('/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        
+        console.log('🔐 Forgot password requested for:', email);
+        
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required' });
+        }
+        
+        const user = await User.findOne({ email });
+        
+        // For security, don't reveal if user exists
+        if (!user) {
+            console.log('User not found:', email);
+            return res.status(200).json({ 
+                message: 'If an account exists with this email, you will receive a password reset link.'
+            });
+        }
+        
+        // Generate reset token
+        const resetToken = crypto.randomBytes(32).toString('hex');
+        const resetTokenExpiry = new Date();
+        resetTokenExpiry.setHours(resetTokenExpiry.getHours() + 1); // 1 hour expiry
+        
+        user.resetPasswordToken = resetToken;
+        user.resetPasswordExpiry = resetTokenExpiry;
+        await user.save();
+        
+        // Send reset email
+        const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}&email=${email}`;
+        
+        // You need to implement sendResetEmail function or use existing email service
+        await sendResetPasswordEmail(email, resetLink);
+        
+        console.log(`✅ Reset link sent to: ${email}`);
+        
+        res.json({ 
+            success: true,
+            message: 'Password reset link sent to your email!'
+        });
+        
+    } catch (err) {
+        console.error('Forgot password error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// RESET PASSWORD - Update password
+router.post('/reset-password', async (req, res) => {
+    try {
+        const { email, token, newPassword } = req.body;
+        
+        console.log('🔐 Reset password attempt for:', email);
+        
+        if (!email || !token || !newPassword) {
+            return res.status(400).json({ message: 'Email, token, and new password are required' });
+        }
+        
+        if (newPassword.length < 6) {
+            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        }
+        
+        const user = await User.findOne({ 
+            email, 
+            resetPasswordToken: token,
+            resetPasswordExpiry: { $gt: new Date() } // Token not expired
+        });
+        
+        if (!user) {
+            return res.status(400).json({ 
+                message: 'Invalid or expired reset token. Please request a new password reset.' 
+            });
+        }
+        
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(newPassword, salt);
+        
+        user.passwordHash = passwordHash;
+        user.resetPasswordToken = undefined;
+        user.resetPasswordExpiry = undefined;
+        await user.save();
+        
+        console.log(`✅ Password reset successful for: ${email}`);
+        
+        res.json({ 
+            success: true,
+            message: 'Password reset successful! You can now login with your new password.'
+        });
+        
+    } catch (err) {
+        console.error('Reset password error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ADD PASSWORD TO EXISTING MAGIC LINK USER
+router.post('/add-password', verifyToken, async (req, res) => {
+    try {
+        const { newPassword } = req.body;
+        
+        if (!newPassword || newPassword.length < 6) {
+            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        }
+        
+        const user = await User.findById(req.user.id);
+        
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(newPassword, salt);
+        
+        user.passwordHash = passwordHash;
+        await user.save();
+        
+        res.json({ 
+            success: true,
+            message: 'Password added successfully! You can now login with password.'
+        });
+        
+    } catch (err) {
+        console.error('Add password error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// UPDATE PASSWORD (for logged-in users)
+router.post('/update-password', verifyToken, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ message: 'Current password and new password are required' });
+        }
+        
+        if (newPassword.length < 6) {
+            return res.status(400).json({ message: 'New password must be at least 6 characters' });
+        }
+        
+        const user = await User.findById(req.user.id);
+        
+        // Verify current password
+        const isValid = await bcrypt.compare(currentPassword, user.passwordHash);
+        if (!isValid) {
+            return res.status(401).json({ message: 'Current password is incorrect' });
+        }
+        
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(newPassword, salt);
+        
+        user.passwordHash = passwordHash;
+        await user.save();
+        
+        res.json({ 
+            success: true,
+            message: 'Password updated successfully!'
+        });
+        
+    } catch (err) {
+        console.error('Update password error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Helper function to send reset email (add this to your magicLinkService.js)
+async function sendResetPasswordEmail(email, resetLink) {
+    // You can use the same email service as magic links
+    const { sendEmail } = require('../services/magicLinkService');
+    
+    const subject = 'PeerSync - Password Reset';
+    const html = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #667eea;">Reset Your PeerSync Password</h2>
+            <p>You requested to reset your password for your PeerSync account.</p>
+            <p>Click the button below to reset your password:</p>
+            <a href="${resetLink}" style="display: inline-block; padding: 12px 24px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; border-radius: 8px; margin: 20px 0;">
+                Reset Password
+            </a>
+            <p>This link will expire in 1 hour.</p>
+            <p>If you didn't request this, please ignore this email.</p>
+            <hr style="margin: 30px 0;" />
+            <p style="color: #666; font-size: 12px;">PeerSync Collaborative Coding Platform</p>
+        </div>
+    `;
+    
+    await sendEmail(email, subject, html);
+}
+
 module.exports = router;

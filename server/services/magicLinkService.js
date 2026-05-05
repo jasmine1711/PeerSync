@@ -184,7 +184,7 @@ const sendMagicLinkEmail = async (email, magicToken, isLogin = true) => {
         console.log(`📧 Sending ${isLogin ? 'login' : 'verification'} email to: ${email}`);
         
         const { data, error } = await resend.emails.send({
-            from: process.env.EMAIL_FROM || 'PeerSync <noreply@resend.dev>',
+            from: process.env.EMAIL_FROM,
             to: [email],
             subject: subject,
             html: htmlContent,
