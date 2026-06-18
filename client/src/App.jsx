@@ -119,7 +119,6 @@ const api = axios.create({
   headers: {
     "Bypass-Tunnel-Reminder": "true",
     "Content-Type": "application/json"
-    // REMOVED: Cache-Control, Pragma, Expires - these cause CORS errors
   },
   withCredentials: true,
   timeout: 15000
@@ -202,6 +201,23 @@ export default function App() {
         }
     };
 
+    // Check microphone permission helper
+    const checkMicrophonePermission = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            stream.getTracks().forEach(track => track.stop());
+            return true;
+        } catch (error) {
+            console.error('Microphone permission error:', error);
+            if (error.name === 'NotAllowedError') {
+                addNotification('error', 'Please allow microphone access in your browser settings');
+            } else if (error.name === 'NotFoundError') {
+                addNotification('error', 'No microphone found on your device');
+            }
+            return false;
+        }
+    };
+
     // Enhanced auth check with token refresh - prevent infinite redirects
     useEffect(() => {
         let isMounted = true;
@@ -226,14 +242,12 @@ export default function App() {
             } catch (error) {
                 console.error('Auth check failed:', error.message);
                 
-                // Don't redirect on CORS errors - just keep trying
                 if (error.message === 'Network Error' && error.code === 'ERR_NETWORK') {
                     console.log('Network/CORS error, retrying in 2 seconds...');
                     setTimeout(checkAuth, 2000);
                     return;
                 }
                 
-                // Only try refresh if we have a refresh token
                 if (refreshToken) {
                     try {
                         const refreshRes = await api.post('/api/auth/refresh-token', { refreshToken });
@@ -247,7 +261,6 @@ export default function App() {
                     }
                 }
                 
-                // Only redirect to login if not a network error
                 if (isMounted && error.message !== 'Network Error') {
                     localStorage.removeItem('token');
                     localStorage.removeItem('refreshToken');
@@ -314,7 +327,6 @@ export default function App() {
     // Fetch Jitsi token with aggressive cache busting
     const getJitsiToken = async () => {
         try {
-            // Clear any cached token first
             sessionStorage.removeItem('jitsiToken');
             localStorage.removeItem('jitsiToken');
             
@@ -322,7 +334,6 @@ export default function App() {
             const userName = localStorage.getItem('userName') || "PeerSync User";
             const userId = localStorage.getItem('userId') || "peersync-user-1";
             
-            // Multiple cache-busting parameters
             const timestamp = Date.now();
             const random = Math.random().toString(36).substring(7);
             
@@ -339,7 +350,6 @@ export default function App() {
             
             const receivedToken = res.data.token;
             
-            // Decode and verify token
             try {
                 const tokenParts = receivedToken.split('.');
                 if (tokenParts.length === 3) {
@@ -378,7 +388,6 @@ export default function App() {
             setJitsiToken(receivedToken);
             setTokenExpiry(res.data.expiresAt);
             
-            // Refresh Jitsi if already initialized
             if (jitsiApiRef.current) {
                 console.log('Re-initializing Jitsi with new token...');
                 jitsiApiRef.current.dispose();
@@ -399,64 +408,134 @@ export default function App() {
         }
     }, [roomId]);
 
-    // Speech Recognition
+    // Speech Recognition - FIXED VERSION
     useEffect(() => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (SpeechRecognition) {
-            if (recognitionRef.current) recognitionRef.current.stop();
+        
+        if (!SpeechRecognition) {
+            console.warn('Speech recognition not supported');
+            addNotification('warning', 'Speech recognition not supported in this browser');
+            return;
+        }
+        
+        // Clean up previous instance
+        if (recognitionRef.current) {
+            try {
+                recognitionRef.current.stop();
+                recognitionRef.current = null;
+            } catch(e) {}
+        }
+        
+        // Create new instance
+        recognitionRef.current = new SpeechRecognition();
+        recognitionRef.current.continuous = true;
+        recognitionRef.current.interimResults = true;
+        recognitionRef.current.lang = speechLang;
+        
+        // Add delay between restarts
+        let restartTimeout = null;
+        let consecutiveErrors = 0;
+        
+        recognitionRef.current.onstart = () => {
+            console.log('🎤 Speech recognition started');
+            consecutiveErrors = 0;
+        };
+        
+        recognitionRef.current.onend = () => {
+            console.log('🎤 Speech recognition ended');
             
-            recognitionRef.current = new SpeechRecognition();
-            recognitionRef.current.continuous = true;
-            recognitionRef.current.interimResults = true;
-            recognitionRef.current.lang = speechLang;
-
-            recognitionRef.current.onresult = (event) => {
-                let interimTranscript = '';
-                for (let i = event.resultIndex; i < event.results.length; ++i) {
-                    const resultText = event.results[i][0].transcript;
-                    if (event.results[i].isFinal) {
+            // Auto-restart if still listening and no errors
+            if (isListening && socket.connected && consecutiveErrors < 3) {
+                if (restartTimeout) clearTimeout(restartTimeout);
+                restartTimeout = setTimeout(() => {
+                    if (isListening && recognitionRef.current) {
+                        try {
+                            recognitionRef.current.start();
+                        } catch(e) {
+                            console.log('Restart failed:', e);
+                        }
+                    }
+                }, 500);
+            }
+        };
+        
+        recognitionRef.current.onerror = (event) => {
+            console.error("Speech recognition error:", event.error);
+            
+            if (event.error === 'network') {
+                consecutiveErrors++;
+                addNotification('warning', 'Speech network issue - reconnecting...');
+                
+                // Stop and restart on network errors
+                if (recognitionRef.current) {
+                    try {
+                        recognitionRef.current.stop();
+                    } catch(e) {}
+                }
+                
+                if (restartTimeout) clearTimeout(restartTimeout);
+                restartTimeout = setTimeout(() => {
+                    if (isListening && recognitionRef.current) {
+                        try {
+                            recognitionRef.current.start();
+                        } catch(e) {
+                            console.log('Restart failed:', e);
+                        }
+                    }
+                }, 2000);
+            } else if (event.error === 'not-allowed') {
+                addNotification('error', 'Microphone access denied - please allow microphone access');
+                setIsListening(false);
+            } else if (event.error === 'no-speech') {
+                // Ignore - just means user didn't speak
+                console.log('No speech detected');
+            }
+        };
+        
+        recognitionRef.current.onresult = (event) => {
+            let interimTranscript = '';
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                const resultText = event.results[i][0].transcript;
+                if (event.results[i].isFinal) {
+                    if (resultText && resultText.trim().length > 0) {
                         setTranscript(prev => prev + " " + resultText);
                         if (socket.connected) {
                             socket.emit("send_caption", { roomId, text: resultText });
                         }
-                        setCurrentSentence(""); 
-                    } else {
-                        interimTranscript += resultText;
-                        setCurrentSentence(interimTranscript);
                     }
-                }
-            };
-
-            recognitionRef.current.onerror = (event) => {
-                console.error("Speech recognition error:", event.error);
-                setIsListening(false);
-                if (event.error === 'not-allowed') {
-                    addNotification('error', 'Microphone access denied');
-                }
-            };
-
-            if (isListening && socket.connected) {
-                try { 
-                    recognitionRef.current.start(); 
-                    console.log('🎤 Speech recognition started');
-                } catch(e) { 
-                    console.error(e);
-                    setIsListening(false);
+                    setCurrentSentence(""); 
+                } else {
+                    interimTranscript += resultText;
+                    setCurrentSentence(interimTranscript);
                 }
             }
-        } else {
-            console.warn('Speech recognition not supported');
-            addNotification('warning', 'Speech recognition not supported in this browser');
+        };
+        
+        // Start recognition if listening
+        if (isListening && socket.connected) {
+            try {
+                setTimeout(() => {
+                    if (recognitionRef.current && isListening) {
+                        recognitionRef.current.start();
+                    }
+                }, 100);
+            } catch(e) { 
+                console.error('Failed to start speech recognition:', e);
+                setIsListening(false);
+                addNotification('error', 'Failed to start speech recognition');
+            }
         }
         
         return () => { 
+            if (restartTimeout) clearTimeout(restartTimeout);
             if (recognitionRef.current) {
                 try {
                     recognitionRef.current.stop();
+                    recognitionRef.current = null;
                 } catch(e) {}
             }
         };
-    }, [speechLang, isListening, roomId]);
+    }, [speechLang, isListening, roomId, socket.connected]);
 
     // Jitsi initialization with RS256 token and correct room format
     const initJitsi = () => {
@@ -465,16 +544,15 @@ export default function App() {
                 setJitsiActive(true);
                 const domain = "8x8.vc";
                 
-                // CRITICAL FIX: Use the correct room name format with app ID
                 const appId = "vpaas-magic-cookie-8f291ebf52794eb5896baaed63b01738";
-                const formattedRoomName = `${appId}/${roomId}`;  // This is the correct format!
+                const formattedRoomName = `${appId}/${roomId}`;
                 
                 console.log('🎥 Initializing Jitsi with room:', formattedRoomName);
                 console.log('🔑 Token algorithm verification passed');
                 console.log('📝 Original roomId:', roomId);
                 
                 const options = {
-                    roomName: formattedRoomName,  // Use formatted room name
+                    roomName: formattedRoomName,
                     jwt: jitsiToken,
                     width: "100%", 
                     height: "100%",
@@ -485,7 +563,7 @@ export default function App() {
                         startWithVideoMuted: false,
                         disableDeepLinking: true,
                         enableWelcomePage: false,
-                        channelLastN: -1,  // Allow all participants
+                        channelLastN: -1,
                         disabledSounds: [],
                         defaultLanguage: 'en',
                         disableInviteFunctions: false,
@@ -493,7 +571,7 @@ export default function App() {
                         enableCalendarIntegration: false,
                         enableEmailIntegration: false,
                         enableGoogleAPIs: false,
-                        p2p: { enabled: true },  // Enable P2P for better connection
+                        p2p: { enabled: true },
                         resolution: 720,
                         hosts: {
                             domain: '8x8.vc',
@@ -543,7 +621,6 @@ export default function App() {
                     setJitsiError(true);
                     addNotification('error', `Video connection failed (Attempt ${jitsiRetryCount + 1}/3)`);
                     
-                    // Auto retry up to 3 times
                     if (jitsiRetryCount < 3) {
                         setTimeout(() => {
                             console.log(`🔄 Retrying Jitsi connection (${jitsiRetryCount + 1}/3)...`);
@@ -907,7 +984,21 @@ export default function App() {
                             </select>
                         </div>
                         <button 
-                            onClick={() => setIsListening(!isListening)} 
+                            onClick={async () => {
+                                if (!isListening) {
+                                    const hasPermission = await checkMicrophonePermission();
+                                    if (hasPermission) {
+                                        setIsListening(true);
+                                    }
+                                } else {
+                                    setIsListening(false);
+                                    if (recognitionRef.current) {
+                                        try {
+                                            recognitionRef.current.stop();
+                                        } catch(e) {}
+                                    }
+                                }
+                            }} 
                             className={`mic-button ${isListening ? 'active' : ''}`}
                             disabled={!socket.connected}
                         >

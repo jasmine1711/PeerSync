@@ -87,6 +87,37 @@ app.get('/api/debug-env', (req, res) => {
   });
 });
 
+// Test endpoint for Piston API
+app.get('/api/test-piston', async (req, res) => {
+  try {
+    const testCode = "print('Hello from Piston API!')";
+    const response = await axios({
+      method: 'POST',
+      url: 'https://emkc.org/api/v2/piston/execute',
+      data: {
+        language: "python",
+        version: "3.10.0",
+        files: [{ content: testCode }],
+        stdin: ""
+      },
+      timeout: 10000,
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+    res.json({
+      success: true,
+      output: response.data.run?.output || response.data.run?.stderr,
+      message: "Piston API is working correctly!"
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      error: error.message,
+      message: "Piston API is not reachable. Will use fallback mode."
+    });
+  }
+});
+
 // --- 1. JITSI JWT GENERATION (FIXED FOR 8x8.vc WITH RSA) ---
 app.get("/api/jitsi-token", (req, res) => {
   try {
@@ -179,13 +210,13 @@ app.get("/api/jitsi-token", (req, res) => {
   }
 });
 
-// --- 2. CODE EXECUTION (Using Piston API - Free) ---
+// --- 2. CODE EXECUTION (Using Free Community Judge0 - No API Key) ---
 app.post("/api/execute", async (req, res) => {
   const { language, code } = req.body;
   
   console.log(`📝 Executing ${language} code...`);
   
-  // For JavaScript - Execute locally (fastest)
+  // JavaScript - Local execution (always works 100%)
   if (language === 'javascript') {
     try {
       let output = '';
@@ -220,64 +251,129 @@ app.post("/api/execute", async (req, res) => {
     }
   }
   
-  // For other languages - Use Piston API (Free)
+  // Language IDs for free Judge0 CE endpoint
   const languageMap = {
-    python: { language: 'python', version: '3.10.0' },
-    java: { language: 'java', version: '15.0.2' },
-    cpp: { language: 'cpp', version: '10.2.0' }
+    python: { id: 71, name: 'python' },
+    java: { id: 62, name: 'java' },
+    cpp: { id: 54, name: 'cpp' }
   };
   
-  const langConfig = languageMap[language];
+  const lang = languageMap[language];
   
-  if (!langConfig) {
-    res.json({ output: `⚠️ ${language} is not supported yet. Try JavaScript, Python, Java, or C++` });
+  if (!lang) {
+    res.json({ output: `⚠️ ${language} is not supported. Use JavaScript, Python, Java, or C++` });
     return;
   }
   
+  // Use the FREE community endpoint (no API key needed!)
   try {
-    console.log(`🚀 Sending ${language} code to Piston API...`);
+    console.log(`🚀 Executing ${language} via free Judge0 CE...`);
     
-    const response = await axios.post('https://emkc.org/api/v2/piston/execute', {
-      language: langConfig.language,
-      version: langConfig.version,
-      files: [{ content: code }],
+    // Submit code
+    const submitResponse = await axios.post('https://ce.judge0.com/submissions', {
+      source_code: code,
+      language_id: lang.id,
       stdin: ""
     }, {
-      timeout: 10000,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 10000
     });
     
-    let output = response.data.run.output || response.data.run.stderr || '✅ Code executed successfully (no output)';
+    const token = submitResponse.data.token;
+    console.log(`📝 Submission token: ${token}`);
     
-    if (output.length > 5000) {
-      output = output.substring(0, 5000) + '\n... (output truncated)';
+    // Wait and get result
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    const resultResponse = await axios.get(`https://ce.judge0.com/submissions/${token}`, {
+      timeout: 10000
+    });
+    
+    const result = resultResponse.data;
+    let output = '';
+    
+    if (result.compile_output) {
+      output = `❌ Compilation Error:\n${result.compile_output}`;
+    } else if (result.stderr) {
+      output = `❌ Runtime Error:\n${result.stderr}`;
+    } else if (result.stdout) {
+      output = result.stdout;
+    } else {
+      output = `✅ ${language.toUpperCase()} code executed successfully (no output)`;
     }
     
-    if (response.data.run.stderr && !response.data.run.output) {
-      output = `❌ ${language.toUpperCase()} Error:\n${response.data.run.stderr}`;
-    }
-    
-    console.log(`✅ ${language} code executed via Piston API`);
-    res.json({ output });
+    console.log(`✅ ${language} executed successfully`);
+    res.json({ output: output.trim() });
     
   } catch (error) {
-    console.error(`Piston API error for ${language}:`, error.message);
+    console.error(`Free Judge0 error:`, error.message);
     
-    let fallbackMessage = `⚠️ ${language.toUpperCase()} execution temporarily unavailable.\n\n`;
-    fallbackMessage += `💡 Your code:\n${code}\n\n`;
-    fallbackMessage += `💡 To run ${language.toUpperCase()} locally:\n`;
-    
-    if (language === 'python') {
-      fallbackMessage += `1. Install Python: https://python.org\n2. Save as script.py\n3. Run: python script.py\n\n💡 Online Python runner: https://replit.com`;
-    } else if (language === 'java') {
-      fallbackMessage += `1. Install JDK: https://adoptium.net\n2. Save as Main.java\n3. Run: javac Main.java && java Main\n\n💡 Online Java runner: https://replit.com`;
-    } else if (language === 'cpp') {
-      fallbackMessage += `1. Install GCC: https://gcc.gnu.org\n2. Save as main.cpp\n3. Run: g++ main.cpp -o main && ./main\n\n💡 Online C++ runner: https://replit.com`;
+    // Try alternative free endpoint
+    try {
+      console.log(`🔄 Trying alternative endpoint...`);
+      
+      const altSubmit = await axios.post('https://judge0-occ7.onrender.com/submissions', {
+        source_code: code,
+        language_id: lang.id,
+        stdin: ""
+      }, { timeout: 10000 });
+      
+      const altToken = altSubmit.data.token;
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      const altResult = await axios.get(`https://judge0-occ7.onrender.com/submissions/${altToken}`, {
+        timeout: 10000
+      });
+      
+      const result = altResult.data;
+      let output = '';
+      
+      if (result.compile_output) output = `❌ Compilation Error:\n${result.compile_output}`;
+      else if (result.stderr) output = `❌ Runtime Error:\n${result.stderr}`;
+      else if (result.stdout) output = result.stdout;
+      else output = `✅ ${language.toUpperCase()} executed successfully`;
+      
+      console.log(`✅ ${language} executed via alternative endpoint`);
+      res.json({ output: output.trim() });
+      return;
+      
+    } catch (altError) {
+      console.log(`Alternative endpoint also failed`);
     }
     
-    fallbackMessage += `\n💡 Or use JavaScript for instant execution in the browser!`;
-    
-    res.json({ output: fallbackMessage });
+    // Final fallback
+    res.json({
+      output: `⚠️ ${language.toUpperCase()} execution is currently unavailable.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💻 YOUR ${language.toUpperCase()} CODE:
+${code}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 FREE SOLUTIONS (No credit card needed):
+
+1️⃣ USE JAVASCRIPT (Works 100% in PeerSync):
+   • Click language dropdown → Select "JavaScript"
+   • Your logic can be rewritten in JavaScript
+
+2️⃣ USE REPLIT (FREE & RELIABLE):
+   • Go to https://replit.com
+   • Create a new ${language.toUpperCase()} repl
+   • Paste your code and run (no limits, no payment)
+
+3️⃣ RUN LOCALLY (FREE FOREVER):
+   ${language === 'python' ? '• Install Python: https://python.org\n   • Save as script.py\n   • Run: python script.py' : 
+     language === 'java' ? '• Install JDK: https://adoptium.net\n   • Save as Main.java\n   • Run: javac Main.java && java Main' : 
+     '• Install GCC: https://gcc.gnu.org\n   • Save as main.cpp\n   • Run: g++ main.cpp -o main && ./main'}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 RECOMMENDATION:
+For the best experience in PeerSync, use JavaScript. 
+For other languages, use Replit or run locally - both are free!`
+    });
   }
 });
 
@@ -329,6 +425,33 @@ app.post("/api/summarize", async (req, res) => {
     console.error("❌ AI Generation Failed:", error.message);
     res.status(500).json({ error: "AI Failed", details: error.message });
   }
+});
+
+// Check API status endpoint
+app.get('/api/api-status', async (req, res) => {
+  const results = [];
+  
+  const testAPIs = [
+    { name: 'Piston API', url: 'https://emkc.org/api/v2/piston/execute', method: 'POST' },
+    { name: 'CodeX API', url: 'https://api.codex.jaagrav.in/execute', method: 'POST' },
+    { name: 'GDebug API', url: 'https://gdb.gdplabs.com/api/run', method: 'POST' }
+  ];
+  
+  for (const api of testAPIs) {
+    try {
+      const start = Date.now();
+      await axios.post(api.url, { test: true }, { timeout: 5000 });
+      results.push({ name: api.name, status: 'online', latency: Date.now() - start });
+    } catch (err) {
+      results.push({ name: api.name, status: 'offline', error: err.message });
+    }
+  }
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    results: results,
+    recommendation: 'JavaScript execution always works. For other languages, use the JavaScript conversion or run locally.'
+  });
 });
 
 // --- 4. SOCKET.IO ---
